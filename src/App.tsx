@@ -139,7 +139,7 @@ export default function App() {
 
   const handleGrantTemporary = async (deviceId: string, durationMinutes: number, note?: string) => {
     try {
-      const res = await api.grantTemporaryAccess(deviceId, durationMinutes, note);
+      const res = await api.grantTemporaryAccess(deviceId, { durationMinutes, note });
       if (res.success) {
         showToast(res.message, 'warning');
         await loadData();
@@ -412,94 +412,110 @@ export default function App() {
       </div>
 
       {/* Modals */}
-      <DeviceDetailsModal
-        device={inspectingDevice}
-        onClose={() => setInspectingDevice(null)}
-        onTrustPermanently={(d) => {
-          setInspectingDevice(null);
-          setPermanentTrustDevice(d);
-        }}
-        onGrantTemporary={(d) => {
-          setInspectingDevice(null);
-          setTemporaryAuthDevice(d);
-        }}
-        onRevokeTrust={(d) => {
-          setInspectingDevice(null);
-          setRevokeDevice(d);
-        }}
-        onDeleteDevice={(d) => {
-          setInspectingDevice(null);
-          setDeleteDevice(d);
-        }}
-        onOpenInvestigation={handleOpenInvestigationForDevice}
-        onViewFingerprint={(d) => setFingerprintDevice(d)}
-      />
+      {inspectingDevice && (
+        <DeviceDetailsModal
+          device={inspectingDevice}
+          onClose={() => setInspectingDevice(null)}
+          onTrustPermanently={(d) => {
+            setInspectingDevice(null);
+            setPermanentTrustDevice(d);
+          }}
+          onGrantTemporary={(d) => {
+            setInspectingDevice(null);
+            setTemporaryAuthDevice(d);
+          }}
+          onRevokeTrust={(d) => {
+            setInspectingDevice(null);
+            setRevokeDevice(d);
+          }}
+          onDeleteDevice={(d) => {
+            setInspectingDevice(null);
+            setDeleteDevice(d);
+          }}
+          onOpenInvestigation={handleOpenInvestigationForDevice}
+          onViewFingerprint={(d) => setFingerprintDevice(d)}
+        />
+      )}
 
-      <FingerprintModal
-        device={fingerprintDevice}
-        onClose={() => setFingerprintDevice(null)}
-      />
+      {fingerprintDevice && (
+        <FingerprintModal
+          device={fingerprintDevice}
+          onClose={() => setFingerprintDevice(null)}
+        />
+      )}
 
-      <TemporaryAuthModal
-        device={temporaryAuthDevice}
-        onClose={() => setTemporaryAuthDevice(null)}
-        onConfirm={handleGrantTemporary}
-      />
+      {temporaryAuthDevice && (
+        <TemporaryAuthModal
+          device={temporaryAuthDevice}
+          onClose={() => setTemporaryAuthDevice(null)}
+          onConfirm={handleGrantTemporary}
+        />
+      )}
 
-      <PermanentTrustModal
-        device={permanentTrustDevice}
-        onClose={() => setPermanentTrustDevice(null)}
-        onConfirm={handleTrustPermanently}
-      />
+      {permanentTrustDevice && (
+        <PermanentTrustModal
+          device={permanentTrustDevice}
+          onClose={() => setPermanentTrustDevice(null)}
+          onConfirm={handleTrustPermanently}
+        />
+      )}
 
-      <IncidentDetailsModal
-        incident={inspectingIncident}
-        onClose={() => setInspectingIncident(null)}
-        onAcknowledge={handleAcknowledgeIncident}
-        onResolve={handleResolveIncident}
-        onOpenDevice={(deviceId) => {
-          setInspectingIncident(null);
-          const dev = devices.find((d) => d.id === deviceId);
-          if (dev) setInspectingDevice(dev);
-        }}
-        onOpenInvestigation={(deviceId) => {
-          setInspectingIncident(null);
-          handleOpenInvestigationForDevice(deviceId);
-        }}
-      />
+      {inspectingIncident && (
+        <IncidentDetailsModal
+          incident={inspectingIncident}
+          onClose={() => setInspectingIncident(null)}
+          onAcknowledge={handleAcknowledgeIncident}
+          onResolve={handleResolveIncident}
+          onOpenDevice={(deviceId) => {
+            setInspectingIncident(null);
+            const dev = devices.find((d) => d.id === deviceId);
+            if (dev) setInspectingDevice(dev);
+          }}
+          onOpenInvestigation={(deviceId) => {
+            setInspectingIncident(null);
+            handleOpenInvestigationForDevice(deviceId);
+          }}
+        />
+      )}
 
       {/* Confirmation: Revoke Trust */}
-      <ConfirmationModal
-        isOpen={Boolean(revokeDevice)}
-        title="Отозвать доверие к устройству?"
-        message={`Вы собираетесь отозвать статус доверенного у устройства "${revokeDevice?.name}" (${revokeDevice?.ip_address}). Устройство будет перемещено в категорию неподтверждённых, а в журнал аудита будет внесена соответствующая запись.`}
-        confirmLabel="Отозвать доверие"
-        confirmVariant="danger"
-        onClose={() => setRevokeDevice(null)}
-        onConfirm={handleRevokeTrustConfirm}
-      />
+      {revokeDevice && (
+        <ConfirmationModal
+          isOpen={true}
+          title="Отозвать доверие к устройству?"
+          message={`Вы собираетесь отозвать статус доверенного у устройства "${revokeDevice.name}" (${revokeDevice.ip_address}). Устройство будет перемещено в категорию неподтверждённых, а в журнал аудита будет внесена соответствующая запись.`}
+          confirmLabel="Отозвать доверие"
+          confirmVariant="danger"
+          onClose={() => setRevokeDevice(null)}
+          onConfirm={handleRevokeTrustConfirm}
+        />
+      )}
 
       {/* Confirmation: Delete Device */}
-      <ConfirmationModal
-        isOpen={Boolean(deleteDevice)}
-        title="Удалить устройство из активного списка?"
-        message={`Устройство "${deleteDevice?.name}" (${deleteDevice?.mac_address}) будет удалено из активного мониторинга. Исторические события, цифровой отпечаток и записи аудита будут сохранены для целостности аналитики.`}
-        confirmLabel="Удалить узел"
-        confirmVariant="danger"
-        onClose={() => setDeleteDevice(null)}
-        onConfirm={handleDeleteDeviceConfirm}
-      />
+      {deleteDevice && (
+        <ConfirmationModal
+          isOpen={true}
+          title="Удалить устройство из активного списка?"
+          message={`Устройство "${deleteDevice.name}" (${deleteDevice.mac_address}) будет удалено из активного мониторинга. Исторические события, цифровой отпечаток и записи аудита будут сохранены для целостности аналитики.`}
+          confirmLabel="Удалить узел"
+          confirmVariant="danger"
+          onClose={() => setDeleteDevice(null)}
+          onConfirm={handleDeleteDeviceConfirm}
+        />
+      )}
 
       {/* Confirmation: Reset Demo */}
-      <ConfirmationModal
-        isOpen={isResetConfirmOpen}
-        title="Сбросить демонстрационное окружение?"
-        message="База данных будет полностью возвращена к исходному эталонному состоянию: 5 доверенных узлов корпоративной инфраструктуры, 0 неизвестных устройств и 0 открытых инцидентов. Это действие очистит симулированные инциденты."
-        confirmLabel="Сбросить данные"
-        confirmVariant="warning"
-        onClose={() => setIsResetConfirmOpen(false)}
-        onConfirm={handleResetDemoConfirm}
-      />
+      {isResetConfirmOpen && (
+        <ConfirmationModal
+          isOpen={true}
+          title="Сбросить демонстрационное окружение?"
+          message="База данных будет полностью возвращена к исходному эталонному состоянию: 5 доверенных узлов корпоративной инфраструктуры, 0 неизвестных устройств и 0 открытых инцидентов. Это действие очистит симулированные инциденты."
+          confirmLabel="Сбросить данные"
+          confirmVariant="warning"
+          onClose={() => setIsResetConfirmOpen(false)}
+          onConfirm={handleResetDemoConfirm}
+        />
+      )}
     </div>
   );
 }

@@ -1,14 +1,23 @@
-import { DashboardData, Device, Incident, EventRecord, AuditRecord } from '../types';
+import {
+  DashboardData, Device, Incident, EventRecord, AuditRecord,
+  AppStateData, AuditIntegrityResult
+} from '../types';
 
 async function handleResponse<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const errorData = await res.json().catch(() => ({}));
-    throw new Error(errorData.error || `HTTP ${res.status}: ${res.statusText}`);
+    const msg = errorData.error?.message || errorData.error || `HTTP ${res.status}: ${res.statusText}`;
+    throw new Error(msg);
   }
   return res.json();
 }
 
 export const api = {
+  async getAppState(): Promise<{ success: boolean; data: AppStateData }> {
+    const res = await fetch('/api/app-state');
+    return handleResponse<{ success: boolean; data: AppStateData }>(res);
+  },
+
   async getDashboard(): Promise<DashboardData> {
     const res = await fetch('/api/dashboard');
     return handleResponse<DashboardData>(res);
@@ -36,11 +45,14 @@ export const api = {
     return handleResponse(res);
   },
 
-  async grantTemporaryAccess(id: string, durationMinutes: number, note?: string): Promise<{ success: boolean; message: string; expiresAt: string }> {
+  async grantTemporaryAccess(
+    id: string,
+    options: { durationMinutes?: number; mode?: 'END_OF_DAY'; note?: string }
+  ): Promise<{ success: boolean; message: string; expiresAt: string }> {
     const res = await fetch(`/api/devices/${id}/temporary-access`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ durationMinutes, note })
+      body: JSON.stringify(options)
     });
     return handleResponse(res);
   },
@@ -91,19 +103,34 @@ export const api = {
     return handleResponse(res);
   },
 
-  async getAuditLog(action?: string, search?: string): Promise<{ success: boolean; auditLog: AuditRecord[] }> {
+  async getAuditLog(action?: string, search?: string, limit: number = 200, offset: number = 0): Promise<{
+    success: boolean;
+    auditLog: AuditRecord[];
+    integrity: AuditIntegrityResult;
+  }> {
     const params = new URLSearchParams();
     if (action) params.append('action', action);
     if (search) params.append('search', search);
+    params.append('limit', String(limit));
+    params.append('offset', String(offset));
     const res = await fetch(`/api/audit?${params.toString()}`);
     return handleResponse(res);
   },
 
-  async getEvents(type?: string, severity?: string, deviceId?: string): Promise<{ success: boolean; events: EventRecord[] }> {
+  async getAuditIntegrity(): Promise<{ success: boolean; integrity: AuditIntegrityResult }> {
+    const res = await fetch('/api/audit/integrity');
+    return handleResponse(res);
+  },
+
+  async getEvents(type?: string, severity?: string, deviceId?: string, limit: number = 200): Promise<{
+    success: boolean;
+    events: EventRecord[];
+  }> {
     const params = new URLSearchParams();
     if (type) params.append('type', type);
     if (severity) params.append('severity', severity);
     if (deviceId) params.append('deviceId', deviceId);
+    params.append('limit', String(limit));
     const res = await fetch(`/api/events?${params.toString()}`);
     return handleResponse(res);
   },

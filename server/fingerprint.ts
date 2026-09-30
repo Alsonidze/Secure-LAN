@@ -1,5 +1,7 @@
 import crypto from 'crypto';
 
+export const FINGERPRINT_ALGORITHM_VERSION = '1.0.0';
+
 export interface FingerprintSource {
   macAddress: string;
   hostname?: string | null;
@@ -9,6 +11,7 @@ export interface FingerprintSource {
 }
 
 export interface FingerprintResult {
+  algorithmVersion: string;
   fingerprint: string;
   fullHash: string;
   confidence: 'High' | 'Medium' | 'Low';
@@ -31,13 +34,14 @@ export function generateDeviceFingerprint(source: FingerprintSource): Fingerprin
   const attributesUsed: Record<string, string> = {
     'MAC-адрес': normMac || 'Отсутствует',
     'Сетевое имя (Hostname)': normHostname || 'Не определено',
-    'Производитель (OUI)': normManufacturer || 'Неизвестен',
+    'Производитель (OUI)': normManufacturer || 'Не определён',
     'Тип устройства': normType,
     'Подсеть LAN': normSubnet
   };
 
-  // Canonical normalized string for hashing
+  // Canonical normalized string for hashing (IP is deliberately excluded as it can change dynamically via DHCP)
   const normalizedString = [
+    `v:${FINGERPRINT_ALGORITHM_VERSION}`,
     `mac:${normMac}`,
     `host:${normHostname}`,
     `mfg:${normManufacturer}`,
@@ -47,30 +51,31 @@ export function generateDeviceFingerprint(source: FingerprintSource): Fingerprin
 
   const fullHash = crypto.createHash('sha256').update(normalizedString).digest('hex').toUpperCase();
 
-  // Short 12-char fingerprint format: FP-XXXX-XXXX-XXXX
+  // Standard 12-char fingerprint format: FP-XXXX-XXXX-XXXX
   const p1 = fullHash.substring(0, 4);
   const p2 = fullHash.substring(4, 8);
   const p3 = fullHash.substring(8, 12);
   const fingerprint = `FP-${p1}-${p2}-${p3}`;
 
-  // Analytical confidence determination
+  // Transparent confidence determination
   let score = 0;
   if (normMac && normMac.length >= 11) score += 2;
-  if (normHostname && normHostname !== 'не определено') score += 1;
-  if (normManufacturer && normManufacturer !== 'неизвестен') score += 1;
+  if (normHostname && normHostname !== 'не определено' && normHostname.length > 0) score += 1;
+  if (normManufacturer && normManufacturer !== 'не определён' && normManufacturer.length > 0) score += 1;
 
   let confidence: 'High' | 'Medium' | 'Low' = 'Low';
-  let confidenceReason = 'Использованы минимальные параметры сетевого обнаружения';
+  let confidenceReason = 'Использованы базовые параметры сетевого обнаружения (MAC-адрес)';
 
   if (score >= 4) {
     confidence = 'High';
-    confidenceReason = 'Идентифицированы MAC-адрес, сетевое имя хоста и вендор сетевого адаптера (OUI)';
+    confidenceReason = 'Идентифицированы MAC-адрес, подтверждённое сетевое имя узла и вендор сетевого адаптера';
   } else if (score >= 2) {
     confidence = 'Medium';
-    confidenceReason = 'Идентифицирован валидный аппаратный MAC-адрес и базовые атрибуты';
+    confidenceReason = 'Идентифицирован валидный аппаратный MAC-адрес и один вспомогательный признак';
   }
 
   return {
+    algorithmVersion: FINGERPRINT_ALGORITHM_VERSION,
     fingerprint,
     fullHash,
     confidence,

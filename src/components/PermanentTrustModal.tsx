@@ -3,7 +3,7 @@ import { Device } from '../types';
 import { X, ShieldCheck, CheckCircle2 } from 'lucide-react';
 
 interface PermanentTrustModalProps {
-  device: Device | null;
+  device: Device;
   onClose: () => void;
   onConfirm: (deviceId: string, data: { name: string; deviceType: string; note: string }) => Promise<void>;
 }
@@ -13,12 +13,10 @@ export const PermanentTrustModal: React.FC<PermanentTrustModalProps> = ({
   onClose,
   onConfirm
 }) => {
-  const [name, setName] = useState(device?.name || '');
-  const [deviceType, setDeviceType] = useState(device?.device_type || 'Laptop');
+  const [name, setName] = useState(device.name || '');
+  const [deviceType, setDeviceType] = useState(device.device_type || 'Laptop');
   const [note, setNote] = useState('Авторизованное корпоративное оборудование');
   const [isSubmitting, setIsSubmitting] = useState(false);
-
-  if (!device) return null;
 
   const deviceTypes = [
     'Desktop',

@@ -28,6 +28,7 @@ export interface Device {
   first_seen: string;
   last_seen: string;
   is_online: number;
+  missed_scans?: number;
   created_at: string;
   updated_at: string;
   deleted_at: string | null;
@@ -74,6 +75,15 @@ export interface AuditRecord {
   target_id: string;
   details: string;
   created_at: string;
+  previous_hash?: string;
+  entry_hash?: string;
+}
+
+export interface AuditIntegrityResult {
+  valid: boolean;
+  checkedRecords: number;
+  brokenAt: string | null;
+  verifiedAt: string;
 }
 
 export interface DashboardStats {
@@ -82,9 +92,11 @@ export interface DashboardStats {
   trustedDevices: number;
   temporaryDevices: number;
   unknownDevices: number;
+  revokedDevices: number;
   openIncidents: number;
   acknowledgedIncidents: number;
   resolvedIncidents: number;
+  unresolvedIncidents: number;
 }
 
 export interface DashboardData {
@@ -98,11 +110,58 @@ export interface DashboardData {
   mode: 'demo' | 'live';
 }
 
+export interface AppStateData {
+  stats: DashboardStats;
+  networkStatus: NetworkStatusType;
+  statusDescription: string;
+  devices: Device[];
+  incidents: Incident[];
+  recentEvents: EventRecord[];
+  distribution: { name: string; count: number; color: string }[];
+  lastScan: string | null;
+  mode: 'demo' | 'live';
+}
+
 export interface FingerprintDetails {
+  algorithmVersion: string;
   fingerprint: string;
   fullHash: string;
   confidence: 'High' | 'Medium' | 'Low';
   confidenceReason: string;
   attributesUsed: Record<string, string>;
   generatedAt: string;
+}
+
+// Uniform standard datetime formatters
+export function formatDateTime(isoString: string | null | undefined): string {
+  if (!isoString) return '—';
+  try {
+    const d = new Date(isoString);
+    if (isNaN(d.getTime())) return '—';
+    return new Intl.DateTimeFormat('ru-RU', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit'
+    }).format(d);
+  } catch {
+    return '—';
+  }
+}
+
+export function formatTime(isoString: string | null | undefined): string {
+  if (!isoString) return '—';
+  try {
+    const d = new Date(isoString);
+    if (isNaN(d.getTime())) return '—';
+    return new Intl.DateTimeFormat('ru-RU', {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit'
+    }).format(d);
+  } catch {
+    return '—';
+  }
 }

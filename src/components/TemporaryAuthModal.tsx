@@ -3,7 +3,7 @@ import { Device } from '../types';
 import { X, Clock, ShieldAlert } from 'lucide-react';
 
 interface TemporaryAuthModalProps {
-  device: Device | null;
+  device: Device;
   onClose: () => void;
   onConfirm: (deviceId: string, durationMinutes: number, note?: string) => Promise<void>;
 }
@@ -18,8 +18,6 @@ export const TemporaryAuthModal: React.FC<TemporaryAuthModalProps> = ({
   const [isCustom, setIsCustom] = useState<boolean>(false);
   const [note, setNote] = useState<string>('Гостевой доступ для рабочей встречи');
   const [isSubmitting, setIsSubmitting] = useState(false);
-
-  if (!device) return null;
 
   const presets = [
     { label: '30 минут', minutes: 30 },

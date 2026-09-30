@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 
 interface DeviceDetailsModalProps {
-  device: Device | null;
+  device: Device;
   onClose: () => void;
   onTrustPermanently: (device: Device) => void;
   onGrantTemporary: (device: Device) => void;
@@ -26,8 +26,6 @@ export const DeviceDetailsModal: React.FC<DeviceDetailsModalProps> = ({
   onOpenInvestigation,
   onViewFingerprint
 }) => {
-  if (!device) return null;
-
   // Local live timer for temporary access remaining time
   const [remainingSec, setRemainingSec] = useState<number>(
     device.activeAuthorization?.remainingSeconds || 0

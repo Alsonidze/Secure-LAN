@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 
 interface IncidentDetailsModalProps {
-  incident: Incident | null;
+  incident: Incident;
   onClose: () => void;
   onAcknowledge: (id: string) => Promise<void>;
   onResolve: (id: string, note: string) => Promise<void>;
@@ -26,8 +26,6 @@ export const IncidentDetailsModal: React.FC<IncidentDetailsModalProps> = ({
   const [isResolving, setIsResolving] = useState(false);
   const [showResolveInput, setShowResolveInput] = useState(false);
   const [loading, setLoading] = useState(false);
-
-  if (!incident) return null;
 
   const getSeverityBadge = (sev: string) => {
     switch (sev) {

@@ -1,4 +1,7 @@
+import crypto from 'crypto';
+
 export interface IncidentEvidence {
+  incidentId: string;
   incidentCode: string;
   deviceId: string;
   type: string;
@@ -8,38 +11,47 @@ export interface IncidentEvidence {
   evidence: string[];
 }
 
-export function generateUnknownDeviceIncident(device: {
-  id: string;
-  name: string;
-  ip: string;
-  mac: string;
-  fingerprint: string;
-  hostname?: string | null;
-  firstSeen: string;
-}, defaultSeverity: 'INFO' | 'LOW' | 'MEDIUM' | 'HIGH' = 'MEDIUM'): IncidentEvidence {
-  const codeNum = Math.floor(1000 + Math.random() * 9000);
-  const incidentCode = `INC-${new Date().getFullYear()}-${codeNum}`;
+export function generateIncidentCode(sequenceNumber: number, year: number = new Date().getFullYear()): string {
+  const padded = String(sequenceNumber).padStart(4, '0');
+  return `INC-${year}-${padded}`;
+}
+
+export function generateUnknownDeviceIncident(
+  device: {
+    id: string;
+    name: string;
+    ip: string;
+    mac: string;
+    fingerprint: string;
+    hostname?: string | null;
+    firstSeen: string;
+  },
+  sequenceNumber: number,
+  defaultSeverity: 'INFO' | 'LOW' | 'MEDIUM' | 'HIGH' = 'MEDIUM'
+): IncidentEvidence {
+  const incidentId = crypto.randomUUID();
+  const incidentCode = generateIncidentCode(sequenceNumber);
   const timeStr = new Date(device.firstSeen).toLocaleTimeString('ru-RU');
 
-  const summary = `Обнаружено новое неизвестное устройство: ${device.ip}`;
+  const summary = `Обнаружено неизвестное устройство: ${device.ip}`;
 
   const explanation =
-    `Устройство с цифровым отпечатком ${device.fingerprint} зафиксировано в сегменте локальной сети в ${timeStr}. ` +
-    `Данный узел отсутствует в локальном реестре доверенных устройств (Trusted Devices). ` +
-    `Присвоен статус «Неизвестное». Данная классификация является превентивной аналитической мерой и не ` +
-    `утверждает наличие вредоносной активности. Рекомендуется идентификация владельца узла и принятие решения ` +
-    `об авторизации либо изоляции.`;
+    `В локальной сети зафиксировано устройство, которое отсутствует в реестре доверенных узлов. ` +
+    `Для аппаратного MAC-адреса ${device.mac} и цифрового отпечатка ${device.fingerprint} не найдено активной разрешающей записи. ` +
+    `Устройство классифицировано как UNKNOWN до верификации и решения администратора. ` +
+    `Статус UNKNOWN не является доказательством вредоносной активности.`;
 
   const evidence = [
     `Цифровой отпечаток (${device.fingerprint}) ранее не регистрировался в системе`,
-    `Устройство отсутствует в реестре разрешённого сетевого оборудования`,
+    `Устройство отсутствует в реестре доверенных узлов (White-list)`,
     `Время первичного обнаружения: ${timeStr} (UTC: ${device.firstSeen})`,
-    `Сетевой адрес в сегменте: ${device.ip}`,
+    `Текущий сетевой адрес в подсети: ${device.ip}`,
     `Аппаратный MAC-адрес адаптера: ${device.mac}`,
-    device.hostname ? `Зафиксированное имя хоста: ${device.hostname}` : 'Сетевое имя узла (hostname) не объявлено'
+    device.hostname ? `Сетевое имя узла (Hostname): ${device.hostname}` : 'Сетевое имя узла (Hostname) не объявлено'
   ];
 
   return {
+    incidentId,
     incidentCode,
     deviceId: device.id,
     type: 'UNKNOWN_DEVICE',

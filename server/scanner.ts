@@ -2,7 +2,11 @@ import os from 'os';
 import { exec } from 'child_process';
 import util from 'util';
 import fs from 'fs';
-import { dbAll, dbGet, dbRun, saveDb, SqlJsDatabase } from './db.js';
+import crypto from 'crypto';
+import {
+  dbAll, dbGet, dbRun, runTransaction, saveDbAtomic,
+  SqlJsDatabase, insertAuditRecord, getNextIncidentSequence
+} from './db.js';
 import { generateDeviceFingerprint } from './fingerprint.js';
 import { generateUnknownDeviceIncident } from './incident.js';
 
@@ -21,6 +25,8 @@ export interface NetworkScanner {
   scan(): Promise<DetectedDevice[]>;
 }
 
+let isScanInProgress = false;
+
 // Memory state for demo simulation
 class DemoNetworkScanner implements NetworkScanner {
   private simulatedDevices: DetectedDevice[] = [
@@ -29,7 +35,7 @@ class DemoNetworkScanner implements NetworkScanner {
       mac: '02:00:5E:7A:11:01',
       hostname: 'sec-admin-workstation.lan',
       deviceType: 'Desktop',
-      manufacturer: 'Lenovo Group Ltd.',
+      manufacturer: 'Lenovo',
       isOnline: true
     },
     {
@@ -37,7 +43,7 @@ class DemoNetworkScanner implements NetworkScanner {
       mac: '02:00:5E:7A:11:02',
       hostname: 'corp-tp-mb.lan',
       deviceType: 'Laptop',
-      manufacturer: 'Lenovo / Apple Inc.',
+      manufacturer: 'Apple Inc.',
       isOnline: true
     },
     {
@@ -67,12 +73,10 @@ class DemoNetworkScanner implements NetworkScanner {
   ];
 
   async scan(): Promise<DetectedDevice[]> {
-    // Return copies of current active demo devices
     return this.simulatedDevices.map(d => ({ ...d }));
   }
 
   addUnknownDevice(): DetectedDevice {
-    // Generate realistic unknown device
     const unknownIps = ['192.168.1.47', '192.168.1.52', '192.168.1.68', '192.168.1.89'];
     const unknownMacs = [
       '8C:7A:15:42:91:B3',
@@ -86,9 +90,8 @@ class DemoNetworkScanner implements NetworkScanner {
       'ASUSTeK Computer Inc.',
       'Intel Corporate'
     ];
-    const types = ['IoT', 'Laptop', 'Smartphone', 'Unknown Device'];
+    const types = ['IoT', 'Laptop', 'Smartphone', 'Workstation'];
 
-    // Pick one that isn't already simulated
     let selectedIp = unknownIps[0];
     let selectedMac = unknownMacs[0];
     let selectedVendor = vendors[0];
@@ -107,13 +110,12 @@ class DemoNetworkScanner implements NetworkScanner {
     const newDev: DetectedDevice = {
       ip: selectedIp,
       mac: selectedMac,
-      hostname: 'unknown-host-' + selectedMac.slice(-5).replace(':', '').toLowerCase(),
+      hostname: 'guest-host-' + selectedMac.slice(-5).replace(':', '').toLowerCase(),
       deviceType: selectedType,
       manufacturer: selectedVendor,
       isOnline: true
     };
 
-    // If already exists in demo pool, update to online; otherwise push
     const existingIndex = this.simulatedDevices.findIndex(d => d.mac === newDev.mac);
     if (existingIndex >= 0) {
       this.simulatedDevices[existingIndex].isOnline = true;
@@ -138,7 +140,7 @@ class DemoNetworkScanner implements NetworkScanner {
         mac: '02:00:5E:7A:11:01',
         hostname: 'sec-admin-workstation.lan',
         deviceType: 'Desktop',
-        manufacturer: 'Lenovo Group Ltd.',
+        manufacturer: 'Lenovo',
         isOnline: true
       },
       {
@@ -146,7 +148,7 @@ class DemoNetworkScanner implements NetworkScanner {
         mac: '02:00:5E:7A:11:02',
         hostname: 'corp-tp-mb.lan',
         deviceType: 'Laptop',
-        manufacturer: 'Lenovo / Apple Inc.',
+        manufacturer: 'Apple Inc.',
         isOnline: true
       },
       {
@@ -177,13 +179,14 @@ class DemoNetworkScanner implements NetworkScanner {
   }
 }
 
-// Live scanner using OS network capabilities
+// Live scanner using local OS passive ARP/neighbor detection
 class LiveNetworkScanner implements NetworkScanner {
   async scan(): Promise<DetectedDevice[]> {
     const devices: DetectedDevice[] = [];
+    const platform = os.platform();
 
     try {
-      // 1. Inspect local network interfaces
+      // 1. Inspect local machine network interfaces
       const ifaces = os.networkInterfaces();
       for (const [name, addrs] of Object.entries(ifaces)) {
         if (!addrs) continue;
@@ -193,45 +196,46 @@ class LiveNetworkScanner implements NetworkScanner {
               ip: addr.address,
               mac: (addr.mac || '02:00:00:00:00:01').toUpperCase(),
               hostname: os.hostname() || 'local-host',
-              deviceType: 'Desktop',
-              manufacturer: 'Local Host System',
+              deviceType: 'Workstation',
+              manufacturer: 'Локальная система',
               isOnline: true
             });
           }
         }
       }
 
-      // 2. Read Linux /proc/net/arp if available
-      if (fs.existsSync('/proc/net/arp')) {
-        const arpData = fs.readFileSync('/proc/net/arp', 'utf-8');
-        const lines = arpData.split('\n').slice(1); // skip header
-        for (const line of lines) {
-          const parts = line.trim().split(/\s+/);
-          if (parts.length >= 4) {
-            const ip = parts[0];
-            const flags = parts[2];
-            const mac = parts[3].toUpperCase();
-            if (mac !== '00:00:00:00:00:00' && flags !== '0x0') {
-              if (!devices.some(d => d.mac === mac)) {
-                devices.push({
-                  ip,
-                  mac,
-                  hostname: null,
-                  deviceType: 'Unknown Device',
-                  manufacturer: 'Сетевой адаптер (ARP)',
-                  isOnline: true
-                });
+      // 2. Linux ARP / neighbor table
+      if (platform === 'linux') {
+        if (fs.existsSync('/proc/net/arp')) {
+          const arpData = fs.readFileSync('/proc/net/arp', 'utf-8');
+          const lines = arpData.split('\n').slice(1);
+          for (const line of lines) {
+            const parts = line.trim().split(/\s+/);
+            if (parts.length >= 4) {
+              const ip = parts[0];
+              const flags = parts[2];
+              const mac = parts[3].toUpperCase();
+              if (mac !== '00:00:00:00:00:00' && flags !== '0x0') {
+                if (!devices.some(d => d.mac === mac)) {
+                  devices.push({
+                    ip,
+                    mac,
+                    hostname: null,
+                    deviceType: 'Unknown Device',
+                    manufacturer: 'Не определён',
+                    isOnline: true
+                  });
+                }
               }
             }
           }
         }
-      } else {
-        // Fallback to arp -a
+
         try {
-          const { stdout } = await execPromise('arp -a');
-          const arpLines = stdout.split('\n');
-          for (const line of arpLines) {
-            const match = line.match(/\(([\d.]+)\)\s+at\s+([0-9a-fA-F:]+)/);
+          const { stdout } = await execPromise('ip neigh');
+          const lines = stdout.split('\n');
+          for (const line of lines) {
+            const match = line.match(/^([\d.]+)\s+dev\s+\S+\s+lladdr\s+([0-9a-fA-F:]+)/);
             if (match) {
               const ip = match[1];
               const mac = match[2].toUpperCase();
@@ -241,18 +245,44 @@ class LiveNetworkScanner implements NetworkScanner {
                   mac,
                   hostname: null,
                   deviceType: 'Unknown Device',
-                  manufacturer: 'Сетевой узел (ARP)',
+                  manufacturer: 'Не определён',
                   isOnline: true
                 });
               }
             }
           }
         } catch {
-          // ARP command might fail in restricted container, graceful handling
+          // ignore ip neigh fallback
+        }
+      } else {
+        // Windows / macOS: arp -a
+        try {
+          const { stdout } = await execPromise('arp -a');
+          const arpLines = stdout.split('\n');
+          for (const line of arpLines) {
+            const match = line.match(/\(([\d.]+)\)\s+at\s+([0-9a-fA-F:]+)/) ||
+                          line.match(/([\d.]+)\s+([0-9a-fA-F-]+)\s+dynamic/i);
+            if (match) {
+              const ip = match[1];
+              const mac = match[2].replace(/-/g, ':').toUpperCase();
+              if (mac !== '00:00:00:00:00:00' && !devices.some(d => d.mac === mac)) {
+                devices.push({
+                  ip,
+                  mac,
+                  hostname: null,
+                  deviceType: 'Unknown Device',
+                  manufacturer: 'Не определён',
+                  isOnline: true
+                });
+              }
+            }
+          }
+        } catch {
+          // command failure graceful handling
         }
       }
     } catch (err) {
-      console.warn('Live scanner notice: limited OS permissions for full ARP scan', err);
+      console.warn('Локальное сканирование ARP завершено с ограничениями ОС');
     }
 
     return devices;
@@ -267,288 +297,412 @@ export const liveScannerInstance = new LiveNetworkScanner();
  */
 export function checkTemporaryAuthorizations(db: SqlJsDatabase): number {
   const nowIso = new Date().toISOString();
-  const expiredAuths = dbAll(db, `
-    SELECT a.id, a.device_id, a.expires_at, d.name, d.ip_address, d.mac_address, d.fingerprint
+  const expiredAuths = dbAll<{
+    id: string;
+    device_id: string;
+    expires_at: string;
+    name: string;
+    ip_address: string;
+    mac_address: string;
+    fingerprint: string;
+    is_online: number;
+  }>(db, `
+    SELECT a.id, a.device_id, a.expires_at, d.name, d.ip_address, d.mac_address, d.fingerprint, d.is_online
     FROM authorizations a
     JOIN devices d ON a.device_id = d.id
     WHERE a.active = 1 AND a.authorization_type = 'TEMPORARY' AND a.expires_at <= ? AND d.deleted_at IS NULL;
   `, [nowIso]);
 
-  for (const auth of expiredAuths) {
-    // 1. Deactivate authorization
-    dbRun(db, `UPDATE authorizations SET active = 0 WHERE id = ?;`, [auth.id]);
+  if (expiredAuths.length === 0) return 0;
 
-    // 2. Return device status to UNKNOWN if it wasn't made TRUSTED
-    dbRun(db, `UPDATE devices SET trust_status = 'UNKNOWN', updated_at = ? WHERE id = ?;`, [nowIso, auth.device_id]);
+  runTransaction(db, () => {
+    for (const auth of expiredAuths) {
+      // 1. Deactivate authorization
+      db.run("UPDATE authorizations SET active = 0 WHERE id = ?;", [auth.id]);
 
-    // 3. Create Event
-    dbRun(db, `
-      INSERT INTO events (id, device_id, event_type, severity, message, metadata, created_at)
-      VALUES (?, ?, 'TEMPORARY_ACCESS_EXPIRED', 'WARNING', ?, ?, ?);
-    `, [
-      'evt-exp-' + Date.now() + '-' + Math.random().toString(36).substring(2, 6),
-      auth.device_id,
-      `Срок временной авторизации для устройства ${auth.name} (${auth.ip_address}) истёк`,
-      JSON.stringify({ expiresAt: auth.expires_at, fingerprint: auth.fingerprint }),
-      nowIso
-    ]);
+      // 2. Return device status to UNKNOWN if not permanently trusted
+      db.run("UPDATE devices SET trust_status = 'UNKNOWN', updated_at = ? WHERE id = ? AND trust_status = 'TEMPORARY';", [nowIso, auth.device_id]);
 
-    // 4. Create Audit record
-    dbRun(db, `
-      INSERT INTO audit_log (id, actor, action, target_type, target_id, details, created_at)
-      VALUES (?, 'Система (Автоматически)', 'TEMPORARY_ACCESS_EXPIRED', 'DEVICE', ?, ?, ?);
-    `, [
-      'aud-exp-' + Date.now() + '-' + Math.random().toString(36).substring(2, 6),
-      auth.device_id,
-      `Временный доступ для устройства ${auth.name} (${auth.mac_address}) автоматически завершён. Статус возвращён в UNKNOWN.`,
-      nowIso
-    ]);
+      // 3. Accurate event message depending on whether device is online or offline
+      const isOnline = auth.is_online === 1;
+      const eventMsg = isOnline
+        ? `Срок временной авторизации для устройства ${auth.name} (${auth.ip_address}) истёк. Узел наблюдается в сети, требуется проверка.`
+        : `Срок временной авторизации для устройства ${auth.name} (${auth.ip_address}) истёк. Узел в данный момент не в сети.`;
 
-    // 5. Open new incident if none open for this device
-    const openInc = dbGet(db, `
-      SELECT id FROM incidents WHERE device_id = ? AND status != 'RESOLVED';
-    `, [auth.device_id]);
-
-    if (!openInc) {
-      const inc = generateUnknownDeviceIncident({
-        id: auth.device_id,
-        name: auth.name,
-        ip: auth.ip_address,
-        mac: auth.mac_address,
-        fingerprint: auth.fingerprint,
-        firstSeen: nowIso
-      }, 'MEDIUM');
-
-      dbRun(db, `
-        INSERT INTO incidents (
-          id, incident_code, device_id, type, severity, status, summary, explanation, evidence, created_at
-        ) VALUES (?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?);
+      db.run(`
+        INSERT INTO events (id, device_id, event_type, severity, message, metadata, created_at)
+        VALUES (?, ?, 'TEMPORARY_ACCESS_EXPIRED', 'WARNING', ?, ?, ?);
       `, [
-        'inc-' + Date.now() + '-' + Math.random().toString(36).substring(2, 6),
-        inc.incidentCode,
-        inc.deviceId,
-        inc.type,
-        inc.severity,
-        `Истёк временный доступ: ${auth.name}`,
-        `Устройство завершило срок временной авторизации. Узел по-прежнему наблюдается в сети, требуется повторная авторизация либо отключение.`,
-        JSON.stringify(inc.evidence),
+        crypto.randomUUID(),
+        auth.device_id,
+        eventMsg,
+        JSON.stringify({ expiresAt: auth.expires_at, fingerprint: auth.fingerprint, isOnline }),
         nowIso
       ]);
+
+      // 4. Create Audit record
+      insertAuditRecord(db, {
+        actor: 'Система (Автоматически)',
+        action: 'TEMPORARY_ACCESS_EXPIRED',
+        targetType: 'DEVICE',
+        targetId: auth.device_id,
+        details: `Срок временного доступа для устройства ${auth.name} (${auth.mac_address}) истёк. Статус возвращён в UNKNOWN.`,
+        createdAt: nowIso
+      });
+
+      // 5. Open new incident if device is online and no unresolved incident exists
+      if (isOnline) {
+        const openInc = dbGet(db, "SELECT id FROM incidents WHERE device_id = ? AND status != 'RESOLVED';", [auth.device_id]);
+        if (!openInc) {
+          const seq = getNextIncidentSequence(db);
+          const inc = generateUnknownDeviceIncident({
+            id: auth.device_id,
+            name: auth.name,
+            ip: auth.ip_address,
+            mac: auth.mac_address,
+            fingerprint: auth.fingerprint,
+            firstSeen: nowIso
+          }, seq, 'MEDIUM');
+
+          db.run(`
+            INSERT INTO incidents (
+              id, incident_code, device_id, type, severity, status, summary, explanation, evidence, created_at
+            ) VALUES (?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?);
+          `, [
+            inc.incidentId,
+            inc.incidentCode,
+            inc.deviceId,
+            inc.type,
+            inc.severity,
+            `Истёк временный доступ: ${auth.name}`,
+            `Устройство завершило период временной авторизации. Узел остаётся активным в сети, требуется повторная авторизация либо отключение.`,
+            JSON.stringify(inc.evidence),
+            nowIso
+          ]);
+
+          db.run(`
+            INSERT INTO events (id, device_id, event_type, severity, message, metadata, created_at)
+            VALUES (?, ?, 'INCIDENT_CREATED', 'WARNING', ?, ?, ?);
+          `, [
+            crypto.randomUUID(),
+            auth.device_id,
+            `Зарегистрирован инцидент ${inc.incidentCode} (истёк временный доступ)`,
+            JSON.stringify({ incidentCode: inc.incidentCode }),
+            nowIso
+          ]);
+        }
+      }
     }
-  }
+  });
 
   return expiredAuths.length;
 }
 
 /**
  * Executes a full scan cycle and correlates results with database.
+ * Protected by a scan mutex lock.
  */
 export async function runNetworkScan(db: SqlJsDatabase) {
+  if (isScanInProgress) {
+    const error: any = new Error('Сканирование сети уже выполняется');
+    error.code = 'SCAN_IN_PROGRESS';
+    throw error;
+  }
+
+  isScanInProgress = true;
   const startTime = new Date();
   const startIso = startTime.toISOString();
 
-  // 1. Process expired temporary authorizations first
-  checkTemporaryAuthorizations(db);
-
-  // 2. Select scanner according to current mode
-  const modeSetting = dbGet(db, "SELECT value FROM settings WHERE key = 'network_mode';");
-  const mode = modeSetting?.value === 'live' ? 'live' : 'demo';
-  const scanner: NetworkScanner = mode === 'live' ? liveScannerInstance : demoScannerInstance;
-
-  // Log scan started event
-  dbRun(db, `
-    INSERT INTO events (id, device_id, event_type, severity, message, metadata, created_at)
-    VALUES (?, NULL, 'SCAN_STARTED', 'INFO', ?, ?, ?);
-  `, [
-    'evt-scan-start-' + Date.now(),
-    `Запущено сканирование локальной сети (Режим: ${mode === 'live' ? 'Реальная сеть' : 'Демо-окружение'})`,
-    JSON.stringify({ mode }),
-    startIso
-  ]);
-
-  let detectedDevices: DetectedDevice[] = [];
   try {
-    detectedDevices = await scanner.scan();
-  } catch (err: any) {
+    // 1. Process expired temporary authorizations
+    checkTemporaryAuthorizations(db);
+
+    // 2. Select scanner by mode
+    const modeSetting = dbGet<{ value: string }>(db, "SELECT value FROM settings WHERE key = 'network_mode';");
+    const mode = modeSetting?.value === 'live' ? 'live' : 'demo';
+    const scanner: NetworkScanner = mode === 'live' ? liveScannerInstance : demoScannerInstance;
+
     dbRun(db, `
       INSERT INTO events (id, device_id, event_type, severity, message, metadata, created_at)
-      VALUES (?, NULL, 'SCAN_FAILED', 'WARNING', ?, ?, ?);
+      VALUES (?, NULL, 'SCAN_STARTED', 'INFO', ?, ?, ?);
     `, [
-      'evt-scan-err-' + Date.now(),
-      `Ошибка при выполнении сканирования сети: ${err?.message || 'Неизвестный сбой'}`,
-      JSON.stringify({ error: String(err) }),
-      new Date().toISOString()
+      crypto.randomUUID(),
+      `Запущено сканирование сети (Режим: ${mode === 'live' ? 'Реальная сеть' : 'Демо-окружение'})`,
+      JSON.stringify({ mode }),
+      startIso
     ]);
-    return { success: false, error: err?.message, devicesFound: 0 };
-  }
 
-  const nowIso = new Date().toISOString();
-  let newDevicesCount = 0;
-  let updatedDevicesCount = 0;
-
-  // Get incident creation setting
-  const autoIncSetting = dbGet(db, "SELECT value FROM settings WHERE key = 'create_incident_on_unknown';");
-  const createIncident = autoIncSetting ? autoIncSetting.value === 'true' : true;
-  const sevSetting = dbGet(db, "SELECT value FROM settings WHERE key = 'incident_severity_default';");
-  const defaultSeverity = (sevSetting?.value || 'MEDIUM') as 'INFO' | 'LOW' | 'MEDIUM' | 'HIGH';
-
-  for (const d of detectedDevices) {
-    const existing = dbGet(db, `
-      SELECT * FROM devices WHERE mac_address = ? AND deleted_at IS NULL;
-    `, [d.mac.toUpperCase()]);
-
-    if (existing) {
-      // Existing device: Check IP change or online transition
-      updatedDevicesCount++;
-      const ipChanged = existing.ip_address !== d.ip;
-      const wasOffline = existing.is_online === 0;
-
-      dbRun(db, `
-        UPDATE devices
-        SET ip_address = ?, hostname = COALESCE(?, hostname), last_seen = ?, is_online = ?, updated_at = ?
-        WHERE id = ?;
-      `, [d.ip, d.hostname || null, nowIso, d.isOnline ? 1 : 0, nowIso, existing.id]);
-
-      if (ipChanged) {
-        dbRun(db, `
-          INSERT INTO events (id, device_id, event_type, severity, message, metadata, created_at)
-          VALUES (?, ?, 'IP_CHANGED', 'INFO', ?, ?, ?);
-        `, [
-          'evt-ip-' + Date.now() + '-' + Math.random().toString(36).substring(2, 6),
-          existing.id,
-          `Устройство ${existing.name} сменило IP-адрес: ${existing.ip_address} → ${d.ip}`,
-          JSON.stringify({ oldIp: existing.ip_address, newIp: d.ip }),
-          nowIso
-        ]);
-      }
-
-      if (wasOffline && d.isOnline) {
-        dbRun(db, `
-          INSERT INTO events (id, device_id, event_type, severity, message, metadata, created_at)
-          VALUES (?, ?, 'DEVICE_ONLINE', 'INFO', ?, ?, ?);
-        `, [
-          'evt-on-' + Date.now() + '-' + Math.random().toString(36).substring(2, 6),
-          existing.id,
-          `Устройство ${existing.name} вновь обнаружено в сети`,
-          JSON.stringify({ ip: d.ip }),
-          nowIso
-        ]);
-      }
-    } else {
-      // New device discovery!
-      newDevicesCount++;
-      const fpResult = generateDeviceFingerprint({
-        macAddress: d.mac,
-        hostname: d.hostname,
-        manufacturer: d.manufacturer,
-        deviceType: d.deviceType
-      });
-
-      const newId = 'dev-' + Date.now() + '-' + Math.random().toString(36).substring(2, 6);
-      const devName = d.hostname || `Неизвестное устройство (${d.ip.split('.').slice(-2).join('.')})`;
-
-      dbRun(db, `
-        INSERT INTO devices (
-          id, name, ip_address, mac_address, hostname, device_type, manufacturer,
-          fingerprint, confidence, trust_status, first_seen, last_seen, is_online,
-          created_at, updated_at, deleted_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'UNKNOWN', ?, ?, 1, ?, ?, NULL);
-      `, [
-        newId, devName, d.ip, d.mac.toUpperCase(), d.hostname || null,
-        d.deviceType || 'Unknown Device', d.manufacturer || 'Неизвестен',
-        fpResult.fingerprint, fpResult.confidence, nowIso, nowIso, nowIso, nowIso
-      ]);
-
-      // Discovery Event
+    let detectedDevices: DetectedDevice[] = [];
+    try {
+      detectedDevices = await scanner.scan();
+    } catch (err: any) {
       dbRun(db, `
         INSERT INTO events (id, device_id, event_type, severity, message, metadata, created_at)
-        VALUES (?, ?, 'DEVICE_DISCOVERED', 'INFO', ?, ?, ?);
+        VALUES (?, NULL, 'SCAN_FAILED', 'WARNING', ?, ?, ?);
       `, [
-        'evt-disc-' + Date.now() + '-' + Math.random().toString(36).substring(2, 6),
-        newId,
-        `В подсети впервые обнаружено новое физическое устройство (${d.ip})`,
-        JSON.stringify({ ip: d.ip, mac: d.mac, hostname: d.hostname }),
-        nowIso
+        crypto.randomUUID(),
+        `Ошибка при выполнении сканирования: ${err?.message || 'Сбой опроса интерфейса'}`,
+        JSON.stringify({ error: String(err) }),
+        new Date().toISOString()
       ]);
-
-      // Fingerprint Created Event
-      dbRun(db, `
-        INSERT INTO events (id, device_id, event_type, severity, message, metadata, created_at)
-        VALUES (?, ?, 'FINGERPRINT_CREATED', 'INFO', ?, ?, ?);
-      `, [
-        'evt-fp-' + Date.now() + '-' + Math.random().toString(36).substring(2, 6),
-        newId,
-        `Сформирован цифровой отпечаток: ${fpResult.fingerprint} (Достоверность: ${fpResult.confidence})`,
-        JSON.stringify(fpResult),
-        nowIso
-      ]);
-
-      // Unknown device event
-      dbRun(db, `
-        INSERT INTO events (id, device_id, event_type, severity, message, metadata, created_at)
-        VALUES (?, ?, 'UNKNOWN_DEVICE_DETECTED', 'WARNING', ?, ?, ?);
-      `, [
-        'evt-unk-' + Date.now() + '-' + Math.random().toString(36).substring(2, 6),
-        newId,
-        `Устройство ${d.ip} не зарегистрировано в белом списке доверенных узлов`,
-        JSON.stringify({ fingerprint: fpResult.fingerprint, mac: d.mac }),
-        nowIso
-      ]);
-
-      // Automatically create incident if enabled
-      if (createIncident) {
-        const inc = generateUnknownDeviceIncident({
-          id: newId,
-          name: devName,
-          ip: d.ip,
-          mac: d.mac,
-          fingerprint: fpResult.fingerprint,
-          hostname: d.hostname,
-          firstSeen: nowIso
-        }, defaultSeverity);
-
-        const incId = 'inc-' + Date.now() + '-' + Math.random().toString(36).substring(2, 6);
-        dbRun(db, `
-          INSERT INTO incidents (
-            id, incident_code, device_id, type, severity, status, summary, explanation, evidence, created_at
-          ) VALUES (?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?);
-        `, [
-          incId, inc.incidentCode, inc.deviceId, inc.type, inc.severity,
-          inc.summary, inc.explanation, JSON.stringify(inc.evidence), nowIso
-        ]);
-
-        dbRun(db, `
-          INSERT INTO events (id, device_id, event_type, severity, message, metadata, created_at)
-          VALUES (?, ?, 'INCIDENT_CREATED', 'WARNING', ?, ?, ?);
-        `, [
-          'evt-inc-' + Date.now() + '-' + Math.random().toString(36).substring(2, 6),
-          newId,
-          `Зарегистрирован инцидент информационной безопасности ${inc.incidentCode}`,
-          JSON.stringify({ incidentCode: inc.incidentCode, severity: inc.severity }),
-          nowIso
-        ]);
-      }
+      return { success: false, error: err?.message, devicesFound: 0 };
     }
+
+    const nowIso = new Date().toISOString();
+    let newDevicesCount = 0;
+    let updatedDevicesCount = 0;
+    let restoredDevicesCount = 0;
+
+    const autoIncSetting = dbGet<{ value: string }>(db, "SELECT value FROM settings WHERE key = 'create_incident_on_unknown';");
+    const createIncident = autoIncSetting ? autoIncSetting.value === 'true' : true;
+    const sevSetting = dbGet<{ value: string }>(db, "SELECT value FROM settings WHERE key = 'incident_severity_default';");
+    const defaultSeverity = (sevSetting?.value || 'MEDIUM') as 'INFO' | 'LOW' | 'MEDIUM' | 'HIGH';
+
+    runTransaction(db, () => {
+      const detectedMacs = new Set<string>();
+
+      for (const d of detectedDevices) {
+        const normMac = d.mac.toUpperCase();
+        detectedMacs.add(normMac);
+
+        // Check if device exists in DB (including soft-deleted)
+        const existing = dbGet<{
+          id: string;
+          name: string;
+          ip_address: string;
+          mac_address: string;
+          hostname: string | null;
+          is_online: number;
+          deleted_at: string | null;
+          trust_status: string;
+        }>(db, "SELECT * FROM devices WHERE mac_address = ?;", [normMac]);
+
+        if (existing) {
+          // If device was soft-deleted, RESTORE it!
+          if (existing.deleted_at !== null) {
+            restoredDevicesCount++;
+            db.run(`
+              UPDATE devices
+              SET deleted_at = NULL, is_online = 1, missed_scans = 0, ip_address = ?, hostname = COALESCE(?, hostname), last_seen = ?, updated_at = ?
+              WHERE id = ?;
+            `, [d.ip, d.hostname || null, nowIso, nowIso, existing.id]);
+
+            db.run(`
+              INSERT INTO events (id, device_id, event_type, severity, message, metadata, created_at)
+              VALUES (?, ?, 'DEVICE_RESTORED', 'INFO', ?, ?, ?);
+            `, [
+              crypto.randomUUID(),
+              existing.id,
+              `Устройство ${existing.name} вновь обнаружено в сети и восстановлено из архива`,
+              JSON.stringify({ ip: d.ip, mac: normMac }),
+              nowIso
+            ]);
+
+            insertAuditRecord(db, {
+              actor: 'Система',
+              action: 'DEVICE_RESTORED',
+              targetType: 'DEVICE',
+              targetId: existing.id,
+              details: `Устройство ${existing.name} (${normMac}) автоматически восстановлено после повторного появления в сети`,
+              createdAt: nowIso
+            });
+          } else {
+            // Existing active device
+            updatedDevicesCount++;
+            const ipChanged = existing.ip_address !== d.ip;
+            const wasOffline = existing.is_online === 0;
+
+            db.run(`
+              UPDATE devices
+              SET ip_address = ?, hostname = COALESCE(?, hostname), last_seen = ?, is_online = ?, missed_scans = 0, updated_at = ?
+              WHERE id = ?;
+            `, [d.ip, d.hostname || null, nowIso, d.isOnline ? 1 : 0, nowIso, existing.id]);
+
+            if (ipChanged) {
+              db.run(`
+                INSERT INTO events (id, device_id, event_type, severity, message, metadata, created_at)
+                VALUES (?, ?, 'IP_CHANGED', 'INFO', ?, ?, ?);
+              `, [
+                crypto.randomUUID(),
+                existing.id,
+                `Устройство ${existing.name} сменило IP-адрес: ${existing.ip_address} → ${d.ip}`,
+                JSON.stringify({ oldIp: existing.ip_address, newIp: d.ip }),
+                nowIso
+              ]);
+            }
+
+            if (wasOffline && d.isOnline) {
+              db.run(`
+                INSERT INTO events (id, device_id, event_type, severity, message, metadata, created_at)
+                VALUES (?, ?, 'DEVICE_ONLINE', 'INFO', ?, ?, ?);
+              `, [
+                crypto.randomUUID(),
+                existing.id,
+                `Устройство ${existing.name} подключилось к сети (Online)`,
+                JSON.stringify({ ip: d.ip }),
+                nowIso
+              ]);
+            }
+          }
+        } else {
+          // Brand new device discovery!
+          newDevicesCount++;
+          const fpResult = generateDeviceFingerprint({
+            macAddress: normMac,
+            hostname: d.hostname,
+            manufacturer: d.manufacturer,
+            deviceType: d.deviceType
+          });
+
+          const newId = crypto.randomUUID();
+          const devName = d.hostname || `Устройство ${d.ip.split('.').slice(-2).join('.')}`;
+
+          db.run(`
+            INSERT INTO devices (
+              id, name, ip_address, mac_address, hostname, device_type, manufacturer,
+              fingerprint, confidence, trust_status, first_seen, last_seen, is_online, missed_scans,
+              created_at, updated_at, deleted_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'UNKNOWN', ?, ?, 1, 0, ?, ?, NULL);
+          `, [
+            newId, devName, d.ip, normMac, d.hostname || null,
+            d.deviceType || 'Unknown Device', d.manufacturer || 'Не определён',
+            fpResult.fingerprint, fpResult.confidence, nowIso, nowIso, nowIso, nowIso
+          ]);
+
+          // Save fingerprint snapshot into device_fingerprints
+          db.run(`
+            INSERT INTO device_fingerprints (
+              id, device_id, algorithm_version, full_hash, display_fingerprint, attributes_json, confidence, created_at, is_current
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1);
+          `, [
+            crypto.randomUUID(),
+            newId,
+            fpResult.algorithmVersion,
+            fpResult.fullHash,
+            fpResult.fingerprint,
+            JSON.stringify(fpResult.attributesUsed),
+            fpResult.confidence,
+            nowIso
+          ]);
+
+          db.run(`
+            INSERT INTO events (id, device_id, event_type, severity, message, metadata, created_at)
+            VALUES (?, ?, 'DEVICE_DISCOVERED', 'INFO', ?, ?, ?);
+          `, [
+            crypto.randomUUID(),
+            newId,
+            `В подсети обнаружено новое физическое устройство (${d.ip})`,
+            JSON.stringify({ ip: d.ip, mac: normMac, hostname: d.hostname }),
+            nowIso
+          ]);
+
+          db.run(`
+            INSERT INTO events (id, device_id, event_type, severity, message, metadata, created_at)
+            VALUES (?, ?, 'FINGERPRINT_CREATED', 'INFO', ?, ?, ?);
+          `, [
+            crypto.randomUUID(),
+            newId,
+            `Сформирован цифровой отпечаток: ${fpResult.fingerprint} (Достоверность: ${fpResult.confidence})`,
+            JSON.stringify(fpResult),
+            nowIso
+          ]);
+
+          db.run(`
+            INSERT INTO events (id, device_id, event_type, severity, message, metadata, created_at)
+            VALUES (?, ?, 'UNKNOWN_DEVICE_DETECTED', 'WARNING', ?, ?, ?);
+          `, [
+            crypto.randomUUID(),
+            newId,
+            `Устройство ${d.ip} (${normMac}) классифицировано как UNKNOWN`,
+            JSON.stringify({ fingerprint: fpResult.fingerprint, mac: normMac }),
+            nowIso
+          ]);
+
+          if (createIncident) {
+            const seq = getNextIncidentSequence(db);
+            const inc = generateUnknownDeviceIncident({
+              id: newId,
+              name: devName,
+              ip: d.ip,
+              mac: normMac,
+              fingerprint: fpResult.fingerprint,
+              hostname: d.hostname,
+              firstSeen: nowIso
+            }, seq, defaultSeverity);
+
+            db.run(`
+              INSERT INTO incidents (
+                id, incident_code, device_id, type, severity, status, summary, explanation, evidence, created_at
+              ) VALUES (?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?);
+            `, [
+              inc.incidentId, inc.incidentCode, inc.deviceId, inc.type, inc.severity,
+              inc.summary, inc.explanation, JSON.stringify(inc.evidence), nowIso
+            ]);
+
+            db.run(`
+              INSERT INTO events (id, device_id, event_type, severity, message, metadata, created_at)
+              VALUES (?, ?, 'INCIDENT_CREATED', 'WARNING', ?, ?, ?);
+            `, [
+              crypto.randomUUID(),
+              newId,
+              `Зарегистрирован инцидент ${inc.incidentCode}`,
+              JSON.stringify({ incidentCode: inc.incidentCode, severity: inc.severity }),
+              nowIso
+            ]);
+          }
+        }
+      }
+
+      // Offline detection for devices missing in current scan
+      const activeDbDevices = dbAll<{ id: string; name: string; ip_address: string; mac_address: string; missed_scans: number }>(
+        db,
+        "SELECT id, name, ip_address, mac_address, missed_scans FROM devices WHERE deleted_at IS NULL AND is_online = 1;"
+      );
+
+      for (const dev of activeDbDevices) {
+        if (!detectedMacs.has(dev.mac_address.toUpperCase())) {
+          const newMissed = dev.missed_scans + 1;
+          if (newMissed >= 2) {
+            // Transition to OFFLINE after 2 consecutive missed scans
+            db.run("UPDATE devices SET is_online = 0, missed_scans = ?, updated_at = ? WHERE id = ?;", [newMissed, nowIso, dev.id]);
+
+            db.run(`
+              INSERT INTO events (id, device_id, event_type, severity, message, metadata, created_at)
+              VALUES (?, ?, 'DEVICE_OFFLINE', 'INFO', ?, ?, ?);
+            `, [
+              crypto.randomUUID(),
+              dev.id,
+              `Устройство ${dev.name} (${dev.ip_address}) отключилось от сети (Offline)`,
+              JSON.stringify({ missedScans: newMissed }),
+              nowIso
+            ]);
+          } else {
+            db.run("UPDATE devices SET missed_scans = ? WHERE id = ?;", [newMissed, dev.id]);
+          }
+        }
+      }
+    });
+
+    const completedIso = new Date().toISOString();
+    dbRun(db, `
+      INSERT INTO events (id, device_id, event_type, severity, message, metadata, created_at)
+      VALUES (?, NULL, 'SCAN_COMPLETED', 'INFO', ?, ?, ?);
+    `, [
+      crypto.randomUUID(),
+      `Сканирование сети завершено. Обнаружено: ${detectedDevices.length} (Новых: ${newDevicesCount}, Восстановлено: ${restoredDevicesCount})`,
+      JSON.stringify({ total: detectedDevices.length, newCount: newDevicesCount, restoredCount: restoredDevicesCount }),
+      completedIso
+    ]);
+
+    return {
+      success: true,
+      totalFound: detectedDevices.length,
+      newDevices: newDevicesCount,
+      restoredDevices: restoredDevicesCount,
+      updatedDevices: updatedDevicesCount,
+      timestamp: completedIso
+    };
+  } finally {
+    isScanInProgress = false;
   }
-
-  // Scan Completed Event
-  const completedIso = new Date().toISOString();
-  dbRun(db, `
-    INSERT INTO events (id, device_id, event_type, severity, message, metadata, created_at)
-    VALUES (?, NULL, 'SCAN_COMPLETED', 'INFO', ?, ?, ?);
-  `, [
-    'evt-scan-comp-' + Date.now(),
-    `Сканирование сети завершено. Найдено узлов: ${detectedDevices.length} (Новых: ${newDevicesCount})`,
-    JSON.stringify({ total: detectedDevices.length, newCount: newDevicesCount, updatedCount: updatedDevicesCount }),
-    completedIso
-  ]);
-
-  saveDb();
-  return {
-    success: true,
-    totalFound: detectedDevices.length,
-    newDevices: newDevicesCount,
-    updatedDevices: updatedDevicesCount,
-    timestamp: completedIso
-  };
 }

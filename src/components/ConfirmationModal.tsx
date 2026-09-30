@@ -2,7 +2,7 @@ import React from 'react';
 import { X, AlertTriangle } from 'lucide-react';
 
 interface ConfirmationModalProps {
-  isOpen: boolean;
+  isOpen?: boolean;
   title: string;
   message: string;
   confirmLabel?: string;
@@ -12,7 +12,7 @@ interface ConfirmationModalProps {
 }
 
 export const ConfirmationModal: React.FC<ConfirmationModalProps> = ({
-  isOpen,
+  isOpen = true,
   title,
   message,
   confirmLabel = 'Подтвердить',
@@ -21,8 +21,6 @@ export const ConfirmationModal: React.FC<ConfirmationModalProps> = ({
   onConfirm
 }) => {
   const [loading, setLoading] = React.useState(false);
-
-  if (!isOpen) return null;
 
   const handleConfirm = async () => {
     setLoading(true);

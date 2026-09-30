@@ -3,13 +3,12 @@ import { Device } from '../types';
 import { X, Fingerprint, Shield, Copy, Check, Info } from 'lucide-react';
 
 interface FingerprintModalProps {
-  device: Device | null;
+  device: Device;
   onClose: () => void;
 }
 
 export const FingerprintModal: React.FC<FingerprintModalProps> = ({ device, onClose }) => {
   const [copied, setCopied] = React.useState(false);
-  if (!device) return null;
 
   const handleCopy = (text: string) => {
     navigator.clipboard.writeText(text);
