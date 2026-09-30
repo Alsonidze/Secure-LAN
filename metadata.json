@@ -1,0 +1,9 @@
+{
+  "name": "Secure LAN",
+  "description": "Информационно-аналитическая система обнаружения и анализа несанкционированных устройств в локальной сети",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
+
